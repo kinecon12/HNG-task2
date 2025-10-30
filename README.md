@@ -1,137 +1,300 @@
-# 🚀 Blue/Green Deployment with Nginx & Docker Compose
+# HNG13 DevOps Stage 3 Task - Blue/Green Deployment with Nginx Auto-Failover
 
-This repository demonstrates a **Blue/Green Node.js service deployment** behind **Nginx**, using pre-built container images and health-based automatic failover — all without rebuilding or modifying the application images.
+## Overview
 
----
+This project implements a Blue/Green deployment strategy for a Node.js application using Nginx as a reverse proxy with automatic failover capabilities. The setup uses Docker Compose to orchestrate two identical application instances (Blue and Green) with Nginx configured to automatically switch from the primary to backup instance on failure.
 
-## 🧩 Overview
+## Architecture
 
-### Architecture
+- **Blue Instance** (Primary): Default active service
+- **Green Instance** (Backup): Standby service, activated on Blue failure
+- **Nginx**: Reverse proxy with health-based failover and retry logic
 
-Client → Nginx (port 8080)
-├── Blue App (active, port 8081)
-└── Green App (backup, port 8082)
+## Features
 
+- ✅ Automatic failover from Blue to Green on primary failure
+- ✅ Zero downtime during failover (requests retry to backup within same client request)
+- ✅ Direct access to both instances for chaos testing
+- ✅ Fast failure detection (1-5 second timeouts)
+- ✅ Header forwarding (`X-App-Pool`, `X-Release-Id`)
+- ✅ Environment-based configuration via `.env` file
 
-### Behavior
+## Prerequisites
 
-- ✅ Normal state: all traffic served by **Blue**
-- ⚠️ On Blue failure (5xx or timeout): **Nginx retries to Green automatically**
-- 🔁 Blue is primary; Green is backup
-- 🧠 Health checks & retries ensure **zero failed client requests**
-- 🪶 Nginx forwards all app headers unchanged
+- Docker
+- Docker Compose
 
----
+## Project Structure
 
-## 🧱 Exposed Endpoints
+```
+.
+├── docker-compose.yml          # Main orchestration file
+├── .env                        # Environment variables
+├── nginx/
+│   ├── Dockerfile             # Nginx container build file
+│   ├── nginx.conf.template    # Nginx configuration template
+│   └── x.sh                   # Template substitution script
+└── README.md
+```
 
-| Path | Description |
-|------|--------------|
-| `GET /version` | Returns JSON + headers: `X-App-Pool`, `X-Release-Id` |
-| `GET /healthz` | Returns 200 if app is healthy |
-| `POST /chaos/start` | Simulates downtime (500s or timeout) |
-| `POST /chaos/stop` | Ends simulated downtime |
+## Environment Variables
 
----
+Configure the deployment using the `.env` file:
 
-## ⚙️ Environment Configuration
+```env
+BLUE_IMAGE=yimikaade/wonderful:devops-stage-two
+GREEN_IMAGE=yimikaade/wonderful:devops-stage-two
+ACTIVE_POOL=blue
+RELEASE_ID_BLUE=v1.blue
+RELEASE_ID_GREEN=v2.green
+PORT=3000
+```
 
-All runtime configuration is handled via a `.env` file:
+### Variable Descriptions
 
+- `BLUE_IMAGE` - Docker image for the Blue instance
+- `GREEN_IMAGE` - Docker image for the Green instance
+- `ACTIVE_POOL` - Active pool identifier (blue or green)
+- `RELEASE_ID_BLUE` - Release identifier for Blue (returned in `X-Release-Id` header)
+- `RELEASE_ID_GREEN` - Release identifier for Green (returned in `X-Release-Id` header)
+- `PORT` - Application port (default: 3000)
+
+## Service Endpoints
+
+### Main Service (via Nginx)
+- **URL**: `http://localhost:8080`
+- **Description**: Load-balanced endpoint with automatic failover
+
+### Direct Instance Access
+- **Blue**: `http://localhost:8081` (for chaos testing)
+- **Green**: `http://localhost:8082` (for chaos testing)
+
+## Available API Endpoints
+
+### GET /version
+Returns version information with headers:
 ```bash
-# .env
-BLUE_IMAGE=example/blue-service:latest
-GREEN_IMAGE=example/green-service:latest
-
-ACTIVE_POOL=blue           # blue or green
-RELEASE_ID_BLUE=v1.0.0
-RELEASE_ID_GREEN=v1.0.1
-
-PORT=8080                  # optional public port
-
-🐳 Docker Compose Setup
-1️⃣ Clone the repo
-
-git clone https://github.com/your-org/blue-green-nginx.git
-cd blue-green-nginx
-
-2️⃣ Create .env file
-
-cp .env.example .env
-
-Update with your image tags and release IDs.
-3️⃣ Start all services
-
-docker compose up -d
-
-4️⃣ Verify baseline
-
 curl -i http://localhost:8080/version
+```
 
-Expected response:
+**Response Headers**:
+- `X-App-Pool`: blue or green
+- `X-Release-Id`: Release identifier
 
-HTTP/1.1 200 OK
-X-App-Pool: blue
-X-Release-Id: v1.0.0
+### GET /healthz
+Health check endpoint:
+```bash
+curl http://localhost:8080/healthz
+```
 
-💥 Simulate Failover
-
-Trigger downtime on Blue:
-
+### POST /chaos/start
+Simulate downtime on a specific instance:
+```bash
+# Trigger chaos on Blue instance
 curl -X POST http://localhost:8081/chaos/start?mode=error
 
-Then call again:
+# Or use timeout mode
+curl -X POST http://localhost:8081/chaos/start?mode=timeout
+```
 
+### POST /chaos/stop
+End simulated downtime:
+```bash
+curl -X POST http://localhost:8081/chaos/stop
+```
+
+## Deployment
+
+### 1. Clone and Setup
+
+```bash
+cd HNG13_DevOps_Stage_2
+```
+
+### 2. Configure Environment
+
+Edit `.env` file with your desired configuration.
+
+### 3. Build and Start Services
+
+```powershell
+# Build all services
+docker-compose build
+
+# Start all services in detached mode
+docker-compose up -d
+```
+
+### 4. Verify Deployment
+
+```powershell
+# Check running containers
+docker-compose ps
+
+# Check logs
+docker-compose logs nginx
+docker-compose logs blue_app
+docker-compose logs green_app
+```
+
+### 5. Test the Service
+
+```powershell
+# Test main endpoint (should return Blue)
 curl -i http://localhost:8080/version
 
-Expected response:
+# Simulate Blue failure
+curl -X POST http://localhost:8081/chaos/start?mode=error
 
-HTTP/1.1 200 OK
-X-App-Pool: green
-X-Release-Id: v1.0.1
+# Test main endpoint again (should now return Green)
+curl -i http://localhost:8080/version
 
-To recover Blue:
-
+# Stop chaos
 curl -X POST http://localhost:8081/chaos/stop
+```
 
-🧠 Nginx Configuration Details
+## Failover Configuration
 
-    Uses backup directive for Green.
+### Nginx Upstream Settings
 
-    Detects failures quickly with:
+```nginx
+upstream app_backend {
+    server blue_app:3000 max_fails=2 fail_timeout=5s;
+    server green_app:3000 backup;
+}
+```
 
-max_fails=1 fail_timeout=5s;
+- **max_fails**: Number of failed attempts before marking server as down
+- **fail_timeout**: Time period for max_fails check
+- **backup**: Green only receives traffic when Blue is unavailable
+
+### Proxy Settings
+
+```nginx
 proxy_connect_timeout 1s;
-proxy_read_timeout 1s;
+proxy_send_timeout 3s;
+proxy_read_timeout 3s;
 proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
+proxy_next_upstream_tries 2;
+proxy_next_upstream_timeout 10s;
+```
 
-Forwards headers transparently:
+- Fast timeouts ensure quick failure detection
+- Retry on errors, timeouts, and 5xx responses
+- Maximum 2 retry attempts within 10 seconds
 
-    proxy_pass_header X-App-Pool;
-    proxy_pass_header X-Release-Id;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $remote_addr;
+## Stopping Services
 
-🧪 Verification Logic (for CI)
-Test	Expected Result
-Baseline	All /version requests → 200 from Blue
-After Chaos	All /version requests → 200 from Green
-Stability	0 failed requests after chaos, ≥95% served by Green
-Header Integrity	X-App-Pool and X-Release-Id correct before/after switch
-🔄 Restart or Reload Nginx
+```powershell
+# Stop all services
+docker-compose down
 
-If you update .env or change ACTIVE_POOL:
+# Stop and remove volumes
+docker-compose down -v
+```
 
-docker compose exec nginx nginx -s reload
+## Troubleshooting
 
-🧹 Tear Down
+### Nginx container exits immediately
 
-docker compose down
+Check nginx logs:
+```powershell
+docker-compose logs nginx
+```
 
-🧰 Directory Structure
+Common issues:
+- Configuration syntax errors
+- Missing environment variables
+- Template substitution failures
 
-blue-green-nginx/
-├── docker-compose.yml
-├── nginx.conf.template
-├── .env.example
-└── README.md
+### Can't access services
+
+Verify ports are not in use:
+```powershell
+netstat -ano | findstr :8080
+netstat -ano | findstr :8081
+netstat -ano | findstr :8082
+```
+
+### Failover not working
+
+1. Check nginx configuration:
+```powershell
+docker-compose exec nginx cat /etc/nginx/nginx.conf
+```
+
+2. Monitor logs during chaos test:
+```powershell
+docker-compose logs -f nginx
+```
+
+3. Verify both instances are running:
+```powershell
+docker-compose ps
+```
+
+## Testing Failover Behavior
+
+### Expected Behavior
+
+1. **Normal State**: All requests → Blue instance
+   - `X-App-Pool: blue`
+   - `X-Release-Id: v1.blue`
+
+2. **After Chaos on Blue**: Automatic failover → Green instance
+   - `X-App-Pool: green`
+   - `X-Release-Id: v2.green`
+
+3. **Zero Failed Requests**: Client requests succeed even during failover
+
+### Test Script
+
+```powershell
+# Test baseline
+for ($i=1; $i -le 10; $i++) { 
+    curl -s http://localhost:8080/version | Select-String "X-App-Pool"
+}
+
+# Trigger chaos
+curl -X POST http://localhost:8081/chaos/start?mode=error
+
+# Test failover (should show green)
+for ($i=1; $i -le 10; $i++) { 
+    curl -s http://localhost:8080/version | Select-String "X-App-Pool"
+}
+
+# Stop chaos
+curl -X POST http://localhost:8081/chaos/stop
+```
+
+## Observability & Alerts (Stage 3)
+
+This repository includes a lightweight Python "log_watcher" sidecar that tails Nginx access logs from a shared volume, detects failovers and elevated upstream 5xx error rates, and posts alerts to Slack.
+
+Quick start:
+
+1. Copy `.env.example` to `.env` and set `SLACK_WEBHOOK_URL`.
+2. Build and start the stack:
+
+```powershell
+docker-compose up --build -d
+```
+
+3. The watcher will automatically read `/var/log/nginx/access.log` from the `nginx_logs` volume and post alerts to Slack when configured thresholds are breached. See `runbook.md` for operator actions and tuning.
+
+
+## CI/CD Considerations
+
+The setup is designed to work with automated CI/CD pipelines:
+
+- All configuration via `.env` (no hardcoded values)
+- Supports different image tags per environment
+- Fast health checks for quick verification
+- Deterministic failover behavior
+
+## Additional Resources
+
+- [Nginx Upstream Documentation](http://nginx.org/en/docs/http/ngx_http_upstream_module.html)
+- [Docker Compose Documentation](https://docs.docker.com/compose/)
+- [HNG Internship](https://hng.tech/internship)
+

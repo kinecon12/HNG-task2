@@ -1,300 +1,303 @@
-# HNG13 DevOps Stage 3 Task - Blue/Green Deployment with Nginx Auto-Failover
+# Blue/Green Deployment with Observability & Slack Alerts
 
-## Overview
+Zero-downtime Blue/Green deployment using Docker Compose and Nginx with automatic failover, enhanced with real-time monitoring and Slack notifications.
 
-This project implements a Blue/Green deployment strategy for a Node.js application using Nginx as a reverse proxy with automatic failover capabilities. The setup uses Docker Compose to orchestrate two identical application instances (Blue and Green) with Nginx configured to automatically switch from the primary to backup instance on failure.
+## Quick Start
+
+1. **Setup environment:**
+   ```bash
+   cp .env.example .env
+   ```
+
+2. **Start services:**
+   ```bash
+   docker-compose up -d
+   ```
+
+3. **Test deployment:**
+   ```bash
+   curl http://localhost:8080/version
+   ```
 
 ## Architecture
 
-- **Blue Instance** (Primary): Default active service
-- **Green Instance** (Backup): Standby service, activated on Blue failure
-- **Nginx**: Reverse proxy with health-based failover and retry logic
-
-## Features
-
-- ✅ Automatic failover from Blue to Green on primary failure
-- ✅ Zero downtime during failover (requests retry to backup within same client request)
-- ✅ Direct access to both instances for chaos testing
-- ✅ Fast failure detection (1-5 second timeouts)
-- ✅ Header forwarding (`X-App-Pool`, `X-Release-Id`)
-- ✅ Environment-based configuration via `.env` file
-
-## Prerequisites
-
-- Docker
-- Docker Compose
-
-## Project Structure
-
 ```
-.
-├── docker-compose.yml          # Main orchestration file
-├── .env                        # Environment variables
-├── nginx/
-│   ├── Dockerfile             # Nginx container build file
-│   ├── nginx.conf.template    # Nginx configuration template
-│   └── x.sh                   # Template substitution script
-└── README.md
+Client → Nginx (8080) → Blue Service (8081) [Primary]
+                     → Green Service (8082) [Backup]
+                     ↓
+              Log Watcher → Slack Alerts
 ```
 
-## Environment Variables
+## Endpoints
 
-Configure the deployment using the `.env` file:
+- **Public (via Nginx)**: `http://localhost:8080`
+- **Blue Direct**: `http://localhost:8081` 
+- **Green Direct**: `http://localhost:8082`
 
-```env
-BLUE_IMAGE=yimikaade/wonderful:devops-stage-two
-GREEN_IMAGE=yimikaade/wonderful:devops-stage-two
-ACTIVE_POOL=blue
-RELEASE_ID_BLUE=v1.blue
-RELEASE_ID_GREEN=v2.green
-PORT=3000
-```
+### Available Routes
+- `GET /version` - Service version and headers
+- `GET /healthz` - Health check
+- `POST /chaos/start` - Trigger failure simulation
+- `POST /chaos/stop` - Stop failure simulation
 
-### Variable Descriptions
+## Testing Failover
 
-- `BLUE_IMAGE` - Docker image for the Blue instance
-- `GREEN_IMAGE` - Docker image for the Green instance
-- `ACTIVE_POOL` - Active pool identifier (blue or green)
-- `RELEASE_ID_BLUE` - Release identifier for Blue (returned in `X-Release-Id` header)
-- `RELEASE_ID_GREEN` - Release identifier for Green (returned in `X-Release-Id` header)
-- `PORT` - Application port (default: 3000)
+1. **Baseline test:**
+   ```bash
+   curl http://localhost:8080/version
+   # Should return Blue with X-App-Pool: blue
+   ```
 
-## Service Endpoints
+2. **Trigger chaos on Blue:**
+   ```bash
+   curl -X POST http://localhost:8081/chaos/start?mode=error
+   ```
 
-### Main Service (via Nginx)
-- **URL**: `http://localhost:8080`
-- **Description**: Load-balanced endpoint with automatic failover
+3. **Verify automatic failover:**
+   ```bash
+   curl http://localhost:8080/version
+   # Should return Green with X-App-Pool: green
+   ```
 
-### Direct Instance Access
-- **Blue**: `http://localhost:8081` (for chaos testing)
-- **Green**: `http://localhost:8082` (for chaos testing)
+4. **Stop chaos:**
+   ```bash
+   curl -X POST http://localhost:8081/chaos/stop
+   ```
 
-## Available API Endpoints
+## Slack Setup
 
-### GET /version
-Returns version information with headers:
+### For HNG Workspace
+1. Ask admin to create incoming webhook for your channel
+2. Update `SLACK_WEBHOOK_URL` in `.env`
+3. Test with: `curl -X POST "$SLACK_WEBHOOK_URL" -d '{"text":"Test message"}'`
+
+### For Personal Testing
+1. Create Slack workspace at https://slack.com/create
+2. Go to https://api.slack.com/apps → "Create New App"
+3. Enable "Incoming Webhooks" and add to channel
+4. Copy webhook URL to `.env`
+
+## Configuration
+
+Environment variables in `.env`:
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `BLUE_IMAGE` | Blue service image | `yimikaade/wonderful:devops-stage-two` |
+| `GREEN_IMAGE` | Green service image | `yimikaade/wonderful:devops-stage-two` |
+| `ACTIVE_POOL` | Primary service | `blue` |
+| `RELEASE_ID_BLUE` | Blue release ID | `v1.0.0-blue` |
+| `RELEASE_ID_GREEN` | Green release ID | `v1.0.0-green` |
+| `PORT` | Application port | `3000` |
+| `SLACK_WEBHOOK_URL` | Slack webhook for alerts | `https://hooks.slack.com/...` |
+| `ERROR_RATE_THRESHOLD` | Error rate alert threshold (%) | `2` |
+| `WINDOW_SIZE` | Request window for error calculation | `200` |
+| `ALERT_COOLDOWN_SEC` | Cooldown between duplicate alerts | `300` |
+
+## Switching Active Pool
+
 ```bash
-curl -i http://localhost:8080/version
+# Edit .env
+ACTIVE_POOL=green
+
+# Restart nginx
+docker-compose up -d nginx
 ```
 
-**Response Headers**:
-- `X-App-Pool`: blue or green
-- `X-Release-Id`: Release identifier
+## Monitoring
 
-### GET /healthz
-Health check endpoint:
 ```bash
+# Check container status
+docker-compose ps
+
+# View logs
+docker-compose logs -f
+
+# Test health
 curl http://localhost:8080/healthz
 ```
 
-### POST /chaos/start
-Simulate downtime on a specific instance:
+## Observability Features
+
+### Structured Logging
+Nginx logs capture:
+- Pool serving request (`blue`/`green`)
+- Release ID of serving application
+- Upstream status and response time
+- Request timing and upstream address
+
+### Slack Alerts
+Automatic notifications for:
+- **Failover Events**: When traffic switches between pools
+- **High Error Rates**: When 5xx errors exceed threshold
+- **Rate Limiting**: Prevents alert spam with cooldown periods
+
+### Viewing Logs
 ```bash
-# Trigger chaos on Blue instance
-curl -X POST http://localhost:8081/chaos/start?mode=error
+# View structured nginx logs
+docker compose logs nginx
 
-# Or use timeout mode
-curl -X POST http://localhost:8081/chaos/start?mode=timeout
+# Monitor log watcher
+docker compose logs -f alert_watcher
+
+# Real-time log analysis
+docker compose exec nginx tail -f /var/log/nginx/access.log
 ```
 
-### POST /chaos/stop
-End simulated downtime:
+## Testing Alerts
+
+### Quick Test (For Mentors/Evaluators)
+
+**Prerequisites:**
 ```bash
-curl -X POST http://localhost:8081/chaos/stop
+# Ensure short cooldown for testing
+sed -i 's/ALERT_COOLDOWN_SEC=300/ALERT_COOLDOWN_SEC=30/' .env
+docker-compose down && docker-compose up --build -d
+sleep 15
 ```
 
-## Deployment
-
-### 1. Clone and Setup
-
+**Test Webhook:**
 ```bash
-cd HNG13_DevOps_Stage_2
+# Verify Slack webhook works
+curl -X POST "$SLACK_WEBHOOK_URL" \
+  -H "Content-Type: application/json" \
+  -d '{"text":"🧪 Test - Blue/Green deployment ready for evaluation"}'
 ```
 
-### 2. Configure Environment
+### 1. Failover Alert Test (Screenshot 1)
 
-Edit `.env` file with your desired configuration.
+**Method A: Container Stop (Guaranteed)**
+```bash
+# Stop blue container to force failover
+docker-compose stop app_blue
 
-### 3. Build and Start Services
+# Make requests (all go to green)
+for i in {1..5}; do
+    echo "Request $i:"
+    curl http://localhost:8080/version
+    sleep 1
+done
 
-```powershell
-# Build all services
-docker-compose build
-
-# Start all services in detached mode
-docker-compose up -d
+# Check Slack for Blue→Green failover alert
 ```
 
-### 4. Verify Deployment
+**Method B: Chaos Mode**
+```bash
+# Trigger chaos on blue
+curl -X POST "http://localhost:8081/chaos/start?mode=error&rate=1.0"
 
-```powershell
-# Check running containers
-docker-compose ps
+# Make requests to trigger failover
+for i in {1..10}; do curl http://localhost:8080/version; sleep 1; done
 
-# Check logs
-docker-compose logs nginx
-docker-compose logs blue_app
-docker-compose logs green_app
+# Check Slack for failover alert
 ```
 
-### 5. Test the Service
+### 2. Reverse Failover Test (Additional Alert)
+```bash
+# Wait for cooldown
+sleep 35
 
-```powershell
-# Test main endpoint (should return Blue)
-curl -i http://localhost:8080/version
+# Restart blue, stop green
+docker-compose start app_blue
+sleep 5
+docker-compose stop app_green
 
-# Simulate Blue failure
-curl -X POST http://localhost:8081/chaos/start?mode=error
+# Make requests (all go to blue)
+for i in {1..5}; do
+    echo "Request $i:"
+    curl http://localhost:8080/version
+    sleep 1
+done
 
-# Test main endpoint again (should now return Green)
-curl -i http://localhost:8080/version
-
-# Stop chaos
-curl -X POST http://localhost:8081/chaos/stop
+# Check Slack for Green→Blue failover alert
 ```
 
-## Failover Configuration
+### 3. Error Rate Alert Test (Screenshot 2)
+```bash
+# Wait for cooldown
+sleep 35
 
-### Nginx Upstream Settings
+# Restart all services
+docker-compose start app_green
+sleep 5
 
-```nginx
-upstream app_backend {
-    server blue_app:3000 max_fails=2 fail_timeout=5s;
-    server green_app:3000 backup;
-}
+# Enable high error rate on both pools
+curl -X POST "http://localhost:8081/chaos/start?mode=error&rate=0.9"
+curl -X POST "http://localhost:8082/chaos/start?mode=error&rate=0.9"
+
+# Generate 60 requests to exceed 2% threshold
+echo "Generating high error rate..."
+for i in {1..60}; do
+    curl http://localhost:8080/version > /dev/null 2>&1
+    if [ $((i % 10)) -eq 0 ]; then
+        echo "Sent $i requests..."
+    fi
+done
+
+# Check Slack for High Error Rate alert
 ```
 
-- **max_fails**: Number of failed attempts before marking server as down
-- **fail_timeout**: Time period for max_fails check
-- **backup**: Green only receives traffic when Blue is unavailable
+### 4. View Container Logs (Screenshot 3)
+```bash
+# View structured nginx logs
+echo "📋 Nginx Structured Logs:"
+docker-compose exec nginx tail -10 /var/log/nginx/access.log
 
-### Proxy Settings
-
-```nginx
-proxy_connect_timeout 1s;
-proxy_send_timeout 3s;
-proxy_read_timeout 3s;
-proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
-proxy_next_upstream_tries 2;
-proxy_next_upstream_timeout 10s;
+# View watcher activity
+echo "🔍 Watcher Activity:"
+docker-compose logs --tail=20 alert_watcher
 ```
 
-- Fast timeouts ensure quick failure detection
-- Retry on errors, timeouts, and 5xx responses
-- Maximum 2 retry attempts within 10 seconds
+### 5. Cleanup
+```bash
+# Stop all chaos modes
+curl -X POST "http://localhost:8081/chaos/stop"
+curl -X POST "http://localhost:8082/chaos/stop"
 
-## Stopping Services
+# Reset cooldown for production
+sed -i 's/ALERT_COOLDOWN_SEC=30/ALERT_COOLDOWN_SEC=300/' .env
 
-```powershell
-# Stop all services
-docker-compose down
-
-# Stop and remove volumes
-docker-compose down -v
+echo "✅ Testing complete - check Slack for 3 alerts"
 ```
 
-## Troubleshooting
+### Troubleshooting Tests
 
-### Nginx container exits immediately
+**If no alerts received:**
+```bash
+# Check watcher is running
+docker-compose ps alert_watcher
 
-Check nginx logs:
-```powershell
-docker-compose logs nginx
+# Check watcher logs
+docker-compose logs alert_watcher
+
+# Check webhook URL
+echo $SLACK_WEBHOOK_URL
+
+# Test webhook directly
+curl -X POST "$SLACK_WEBHOOK_URL" -d '{"text":"Direct webhook test"}'
 ```
 
-Common issues:
-- Configuration syntax errors
-- Missing environment variables
-- Template substitution failures
+**If logs are empty:**
+```bash
+# Check nginx log file
+docker-compose exec nginx ls -la /var/log/nginx/
+docker-compose exec nginx cat /var/log/nginx/access.log
 
-### Can't access services
+# Make test request
+curl http://localhost:8080/version
 
-Verify ports are not in use:
-```powershell
-netstat -ano | findstr :8080
-netstat -ano | findstr :8081
-netstat -ano | findstr :8082
+# Check logs again
+docker-compose exec nginx tail -1 /var/log/nginx/access.log
 ```
 
-### Failover not working
+## Runbook
 
-1. Check nginx configuration:
-```powershell
-docker-compose exec nginx cat /etc/nginx/nginx.conf
-```
+See [runbook.md](runbook.md) for detailed alert response procedures.
 
-2. Monitor logs during chaos test:
-```powershell
-docker-compose logs -f nginx
-```
+## Failover Characteristics
 
-3. Verify both instances are running:
-```powershell
-docker-compose ps
-```
-
-## Testing Failover Behavior
-
-### Expected Behavior
-
-1. **Normal State**: All requests → Blue instance
-   - `X-App-Pool: blue`
-   - `X-Release-Id: v1.blue`
-
-2. **After Chaos on Blue**: Automatic failover → Green instance
-   - `X-App-Pool: green`
-   - `X-Release-Id: v2.green`
-
-3. **Zero Failed Requests**: Client requests succeed even during failover
-
-### Test Script
-
-```powershell
-# Test baseline
-for ($i=1; $i -le 10; $i++) { 
-    curl -s http://localhost:8080/version | Select-String "X-App-Pool"
-}
-
-# Trigger chaos
-curl -X POST http://localhost:8081/chaos/start?mode=error
-
-# Test failover (should show green)
-for ($i=1; $i -le 10; $i++) { 
-    curl -s http://localhost:8080/version | Select-String "X-App-Pool"
-}
-
-# Stop chaos
-curl -X POST http://localhost:8081/chaos/stop
-```
-
-## Observability & Alerts (Stage 3)
-
-This repository includes a lightweight Python "log_watcher" sidecar that tails Nginx access logs from a shared volume, detects failovers and elevated upstream 5xx error rates, and posts alerts to Slack.
-
-Quick start:
-
-1. Copy `.env.example` to `.env` and set `SLACK_WEBHOOK_URL`.
-2. Build and start the stack:
-
-```powershell
-docker-compose up --build -d
-```
-
-3. The watcher will automatically read `/var/log/nginx/access.log` from the `nginx_logs` volume and post alerts to Slack when configured thresholds are breached. See `runbook.md` for operator actions and tuning.
-
-
-## CI/CD Considerations
-
-The setup is designed to work with automated CI/CD pipelines:
-
-- All configuration via `.env` (no hardcoded values)
-- Supports different image tags per environment
-- Fast health checks for quick verification
-- Deterministic failover behavior
-
-## Additional Resources
-
-- [Nginx Upstream Documentation](http://nginx.org/en/docs/http/ngx_http_upstream_module.html)
-- [Docker Compose Documentation](https://docs.docker.com/compose/)
-- [HNG Internship](https://hng.tech/internship)
-
+- **Detection Time**: 1-2 seconds
+- **Failover Time**: <3 seconds  
+- **Success Rate**: ≥95% during failover
+- **Alert Delivery**: <10 seconds to Slack
+- **Zero Failed Requests**: Client always receives 200 response

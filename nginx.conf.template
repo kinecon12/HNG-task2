@@ -1,0 +1,86 @@
+events {
+    worker_connections 1024;
+}
+
+http {
+    # Custom log format for observability
+    log_format observability '$remote_addr - $remote_user [$time_local] '
+                            '"$request" $status $body_bytes_sent '
+                            '"$http_referer" "$http_user_agent" '
+                            'pool="$upstream_http_x_app_pool" '
+                            'release="$upstream_http_x_release_id" '
+                            'upstream_status="$upstream_status" '
+                            'upstream="$upstream_addr" '
+                            'request_time=$request_time '
+                            'upstream_response_time=$upstream_response_time';
+
+    # Upstream configuration for Blue/Green deployment
+    upstream app_backend {
+        # Primary server (active pool)
+        server app_${ACTIVE_POOL}:${PORT} max_fails=1 fail_timeout=2s;
+        
+        # Backup server (opposite pool for failover)
+        server app_blue:${PORT} backup max_fails=1 fail_timeout=2s;
+        server app_green:${PORT} backup max_fails=1 fail_timeout=2s;
+    }
+
+    # Proxy settings for fast failover
+    proxy_connect_timeout 1s;
+    proxy_send_timeout 1s;
+    proxy_read_timeout 1s;
+    proxy_next_upstream error timeout invalid_header http_500 http_502 http_503 http_504;
+    proxy_next_upstream_tries 3;
+    proxy_next_upstream_timeout 3s;
+
+    server {
+        listen 80;
+        server_name localhost;
+        
+        # Use custom log format
+        access_log /var/log/nginx/access.log observability;
+
+        # Health check endpoint
+        location /healthz {
+            proxy_pass http://app_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # Version endpoint
+        location /version {
+            proxy_pass http://app_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            
+            # Ensure headers are forwarded to client
+            proxy_pass_header X-App-Pool;
+            proxy_pass_header X-Release-Id;
+        }
+
+        # Chaos endpoints (for testing)
+        location /chaos/ {
+            proxy_pass http://app_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # Default location
+        location / {
+            proxy_pass http://app_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            
+            # Forward application headers
+            proxy_pass_header X-App-Pool;
+            proxy_pass_header X-Release-Id;
+        }
+    }
+}

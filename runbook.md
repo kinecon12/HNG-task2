@@ -1,53 +1,126 @@
-# Runbook — Log Watcher & Alerts
+# Blue/Green Deployment Runbook
 
-This runbook explains the alerts produced by the log-watcher sidecar and how operators should respond.
+## Alert Types and Response Actions
 
-## Alerts
+### 🔄 Failover Detected Alert
+**Message Format:** `Failover detected: blue → green` or `green → blue`
 
-1) Failover Detected
+**What it means:** The load balancer has switched from one pool to another due to health check failures or manual intervention.
 
-- What it means: The pool that served requests changed (e.g., `blue` → `green`). This usually indicates the primary pool became unhealthy and traffic failed over to the backup.
-- Operator action:
-  - Check the health and logs of the primary container (e.g., the `blue_app` container).
-  - Inspect Nginx access logs and upstream logs for the error that caused failover.
-  - If primary container is unhealthy, consider restarting it or reverting recent deploys.
-  - If this was expected (planned failover), acknowledge in Slack and set `MAINTENANCE_MODE=true` in `.env` while performing maintenance.
+**Operator Actions:**
+1. **Immediate:** Check the health of the failed pool
+   ```bash
+   docker logs stage2-blue-green-app_blue-1
+   docker logs stage2-blue-green-app_green-1
+   ```
 
-2) High Error Rate
+2. **Investigate:** Look for error patterns in application logs
+   ```bash
+   # Check container health
+   docker ps
+   docker inspect stage2-blue-green-app_blue-1 | grep Health
+   ```
 
-- What it means: The log watcher detected a high rate of upstream 5xx responses above the configured threshold over the sliding window.
-- Operator action:
-  - Inspect the recent Nginx access logs for patterns (endpoints, client IPs, upstream addresses).
-  - Check upstream (app) container logs for exceptions or resource exhaustion.
-  - If caused by a deployment, consider rolling back or scaling up.
-  - Consider temporarily switching ACTIVE_POOL to the healthy pool if one exists.
+3. **Recovery:** Once issues are resolved, traffic will automatically return to the primary pool
 
-3) Recovery / Resolved
+### 📊 High Error Rate Alert
+**Message Format:** `High error rate: X.X% (>2%) over 200 requests`
 
-- When traffic returns to the primary pool or error rate falls back under threshold, the watcher won't spam a second alert due to cooldowns. Manually acknowledge in Slack as needed.
+**What it means:** The upstream applications are returning 5xx errors above the configured threshold.
 
-## Suppressing Alerts
+**Operator Actions:**
+1. **Immediate:** Check application logs for errors
+   ```bash
+   docker logs --tail=50 stage2-blue-green-app_blue-1
+   docker logs --tail=50 stage2-blue-green-app_green-1
+   ```
 
-- For planned maintenance or noisy load tests, set `MAINTENANCE_MODE=true` in your `.env` before starting the test. This prevents failover and error-rate alerts from being sent.
+2. **Investigate:** Check resource usage and external dependencies
+   ```bash
+   docker stats
+   # Check if chaos mode is enabled
+   curl http://localhost:8080/version
+   ```
 
-## Tuning Parameters
+3. **Mitigation:** 
+   - If chaos mode is active, disable it by setting `CHAOS_MODE=false`
+   - Consider manual pool toggle if one pool is consistently failing
+   - Scale resources if needed
 
-- `ERROR_RATE_THRESHOLD` — percent of requests that may be 5xx before alerting (default: 2)
-- `WINDOW_SIZE` — number of most recent requests to include in the sliding window (default: 200)
-- `ALERT_COOLDOWN_SEC` — seconds to wait between repeated alerts of the same type (default: 300)
+### 🔧 Manual Pool Toggle
+**When to use:** During planned maintenance or when one pool is consistently problematic.
 
-## Quick Recovery Steps
+**Steps:**
+1. Update the active pool in `.env`:
+   ```bash
+   # Switch from blue to green
+   sed -i 's/ACTIVE_POOL=blue/ACTIVE_POOL=green/' .env
+   ```
 
-1. Check docker-compose service status:
+2. Restart nginx to apply changes:
+   ```bash
+   docker compose restart nginx
+   ```
 
-   docker-compose ps
+3. Verify the switch:
+   ```bash
+   curl -s http://localhost:8080/version | jq '.pool'
+   ```
 
-2. Inspect Nginx logs (shared volume):
+### 🚫 Suppressing Alerts (Maintenance Mode)
+**During planned maintenance:** Temporarily disable the alert watcher to prevent false alarms.
 
-   docker-compose exec log_watcher sh -c "tail -n 200 /var/log/nginx/access.log"
+**Steps:**
+1. Stop the watcher service:
+   ```bash
+   docker compose stop alert_watcher
+   ```
 
-3. Inspect app container logs (example):
+2. Perform maintenance operations
 
-   docker-compose logs --no-color blue_app
+3. Restart the watcher:
+   ```bash
+   docker compose start alert_watcher
+   ```
 
-4. If primary is unhealthy and you need to revert traffic back, investigate the cause, fix or restart the primary, and observe logs until traffic is stable.
+## Configuration Reference
+
+### Environment Variables
+- `ERROR_RATE_THRESHOLD`: Percentage threshold for error rate alerts (default: 2%)
+- `WINDOW_SIZE`: Number of requests to consider for error rate calculation (default: 200)
+- `ALERT_COOLDOWN_SEC`: Minimum seconds between duplicate alerts (default: 300)
+- `SLACK_WEBHOOK_URL`: Slack incoming webhook URL for alerts
+
+### Log Analysis
+View structured nginx logs:
+```bash
+docker compose exec nginx tail -f /var/log/nginx/access.log
+```
+
+Key fields in logs:
+- `pool`: Which application pool served the request
+- `release`: Release identifier of the serving application
+- `upstream_status`: HTTP status from upstream application
+- `upstream`: IP address of the upstream server that handled the request
+
+### Health Checks
+- Application health: `http://localhost:8080/healthz`
+- Version info: `http://localhost:8080/version`
+- Chaos endpoints: `http://localhost:8080/chaos/enable`, `http://localhost:8080/chaos/disable`
+
+## Troubleshooting
+
+### No Alerts Received
+1. Check Slack webhook URL configuration
+2. Verify alert_watcher container is running: `docker compose ps`
+3. Check watcher logs: `docker compose logs alert_watcher`
+
+### False Positive Alerts
+1. Adjust `ERROR_RATE_THRESHOLD` if too sensitive
+2. Increase `WINDOW_SIZE` for more stable error rate calculation
+3. Increase `ALERT_COOLDOWN_SEC` to reduce alert frequency
+
+### Missing Log Data
+1. Ensure nginx container has write access to log volume
+2. Check nginx configuration is properly templated
+3. Verify log format includes all required fields
